@@ -13,13 +13,11 @@ FROM alpine:3
 RUN apk add --no-cache ca-certificates tzdata
 COPY --from=build /out/cmdcode2api /usr/local/bin/cmdcode2api
 
-# config.yaml and usage.json live in /data — mount a volume there so both
-# survive container replacement.
-WORKDIR /data
-VOLUME /data
+# Stateless by design: there is no config file and no data volume. Accounts and
+# client keys added in the WebUI live in memory only and are lost on restart.
+# Only the listen port needs to be exposed.
 EXPOSE 11434
 
-# --host 0.0.0.0 makes the gateway reachable from outside the container;
-# flags override config.yaml, so no config edit is needed.
+# --host 0.0.0.0 makes the gateway reachable from outside the container.
 ENTRYPOINT ["cmdcode2api"]
 CMD ["--host", "0.0.0.0"]

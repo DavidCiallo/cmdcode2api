@@ -14,6 +14,20 @@ import (
 
 const maxChatRequestBytes = 50 * 1024 * 1024
 
+// maxDebugLogBytes caps how much of a request body or SSE event is written to
+// the debug log. Debug logging must not become the memory bottleneck: printing
+// a full 50 MB body (and retaining it in the 500-line in-memory ring) costs far
+// more than the request itself.
+const maxDebugLogBytes = 8 * 1024
+
+// truncateForLog bounds a value for debug output, noting what was elided.
+func truncateForLog(s string) string {
+	if len(s) <= maxDebugLogBytes {
+		return s
+	}
+	return fmt.Sprintf("%s... [%d bytes truncated]", s[:maxDebugLogBytes], len(s)-maxDebugLogBytes)
+}
+
 var debugMode bool
 
 func handleChatCompletions(cc *CCClient, cfg *Config, usage *UsageTracker) http.HandlerFunc {
@@ -27,7 +41,7 @@ func handleChatCompletions(cc *CCClient, cfg *Config, usage *UsageTracker) http.
 				writeError(w, 400, "invalid_request_error", "bad request body: "+err.Error())
 				return
 			}
-			log.Printf("%s %s %s", colorize("[DEBUG]", ansiDim), colorize(">> body", ansiGreen), colorize(string(bodyBytes), ansiCyan))
+			log.Printf("%s %s %s", colorize("[DEBUG]", ansiDim), colorize(">> body", ansiGreen), colorize(truncateForLog(string(bodyBytes)), ansiCyan))
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -227,8 +241,7 @@ func handleStreamWithOptions(w http.ResponseWriter, resp *http.Response, model s
 
 	endKind, err := parseStreamEvents(resp, func(ev CCStreamEvent) error {
 		if cfg.Debug {
-			raw, _ := json.Marshal(ev)
-			log.Printf("%s %s event type=%s raw=%s", colorize("[DEBUG]", ansiDim), colorize("<< cc", ansiCyan), ev.Type, colorize(string(raw), ansiCyan))
+			log.Printf("%s %s event type=%s text=%s", colorize("[DEBUG]", ansiDim), colorize("<< cc", ansiCyan), ev.Type, colorize(truncateForLog(streamEventText(ev)), ansiCyan))
 		}
 		events, err := normalizer.Consume(ev)
 		if err != nil {
@@ -292,8 +305,7 @@ func handleNonStream(w http.ResponseWriter, resp *http.Response, model string, u
 
 	endKind, err := parseStreamEvents(resp, func(ev CCStreamEvent) error {
 		if cfg.Debug {
-			raw, _ := json.Marshal(ev)
-			log.Printf("%s %s event type=%s raw=%s", colorize("[DEBUG]", ansiDim), colorize("<< cc", ansiCyan), ev.Type, colorize(string(raw), ansiCyan))
+			log.Printf("%s %s event type=%s text=%s", colorize("[DEBUG]", ansiDim), colorize("<< cc", ansiCyan), ev.Type, colorize(truncateForLog(streamEventText(ev)), ansiCyan))
 		}
 		events, err := normalizer.Consume(ev)
 		if err != nil {

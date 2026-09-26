@@ -208,7 +208,7 @@ func (p *ClientKeyPool) Config() []ClientKeyConfig {
 	return list
 }
 
-// SyncToConfig copies the pool into cfg ahead of a saveConfig.
+// SyncToConfig copies the pool into cfg's in-memory client-key list.
 func (p *ClientKeyPool) SyncToConfig(cfg *Config) {
 	cfg.APIKeys = p.Config()
 	if len(cfg.APIKeys) > 0 {
@@ -216,7 +216,7 @@ func (p *ClientKeyPool) SyncToConfig(cfg *Config) {
 	}
 }
 
-// persistKeys snapshots the pool into cfg and writes config.yaml.
+// persistKeys snapshots the pool into cfg. Nothing is written to disk.
 func persistKeys(keys *ClientKeyPool, cfg *Config) error {
 	keys.SyncToConfig(cfg)
 	return saveConfig(configFile, cfg)

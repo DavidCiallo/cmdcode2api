@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -87,19 +86,19 @@ func TestAdminErrorsFollowAcceptLanguage(t *testing.T) {
 	})
 
 	t.Run("wrapped cause keeps its detail", func(t *testing.T) {
-		// Point persistence into a directory that does not exist, so saving
-		// fails and the handler wraps the filesystem error.
-		configFile = filepath.Join(t.TempDir(), "missing-dir", "config.yaml")
-		resp, payload := adminRequestIn(t, srv, "PUT", "/admin/api/settings", "admin-pass-123", "zh-CN", map[string]any{"base_url": "https://api.example.test"})
-		if resp.StatusCode != http.StatusInternalServerError {
-			t.Fatalf("status = %d, want 500", resp.StatusCode)
+		// This build has no config file, so saving cannot fail. Exercise the
+		// same localized error path through a rejection that still carries a
+		// specific underlying reason: changing the admin password without the
+		// current one must be refused with its own message, not a generic one.
+		resp, payload := adminRequestIn(t, srv, "PUT", "/admin/api/settings", "admin-pass-123", "zh-CN", map[string]any{
+			"admin_password": "brand-new-pass",
+			"old_password":   "wrong-old-pass",
+		})
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", resp.StatusCode)
 		}
-		got := errorOf(t, payload)
-		if !strings.HasPrefix(got, "已应用，但保存配置失败：") {
-			t.Errorf("error = %q, want the localized wrapper prefix", got)
-		}
-		if !strings.Contains(got, "missing-dir") {
-			t.Errorf("error = %q, want the underlying cause kept verbatim", got)
+		if got := errorOf(t, payload); got != "当前管理密码不正确" {
+			t.Errorf("error = %q, want the localized detail", got)
 		}
 	})
 }

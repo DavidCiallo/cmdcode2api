@@ -407,10 +407,6 @@ func handleAdminModelsPut(cfg *Config) http.HandlerFunc {
 		}
 
 		cfg.SetExcludes(excludes)
-		if err := saveConfig(configFile, cfg); err != nil {
-			writeAdminError(w, r, 500, "applied but saving config failed: "+err.Error())
-			return
-		}
 		log.Printf("model exposure updated via webui (%d exposed, %d excluded)", len(exposed), len(excludes))
 		writeAdminJSON(w, 200, map[string]any{"exclude_models": excludes})
 	}
@@ -684,12 +680,9 @@ func handleAdminSettingsPut(cfg *Config, cc *CCClient, pool *AccountPool) http.H
 			restartRequired = append(restartRequired, "webui")
 		}
 
-		// Keep the persisted config consistent with the live pool.
+		// Keep the in-memory config consistent with the live pool. Nothing is
+		// written to disk: this build is stateless by design.
 		pool.SyncToConfig(cfg)
-		if err := saveConfig(configFile, cfg); err != nil {
-			writeAdminError(w, r, 500, "applied but saving config failed: "+err.Error())
-			return
-		}
 		log.Printf("settings updated via webui (restart required: %v)", restartRequired)
 		writeAdminJSON(w, 200, map[string]any{
 			"settings":         adminSettingsFrom(cfg),
@@ -966,7 +959,8 @@ func handleWebOAuthCallback() http.HandlerFunc {
 	}
 }
 
-// persistPool snapshots the pool into cfg and writes config.yaml.
+// persistPool snapshots the live pool into cfg's in-memory account list so
+// reads of cfg stay consistent with the pool. Nothing is written to disk.
 func persistPool(pool *AccountPool, cfg *Config) error {
 	pool.SyncToConfig(cfg)
 	return saveConfig(configFile, cfg)

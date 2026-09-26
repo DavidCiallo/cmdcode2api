@@ -312,27 +312,59 @@ func (c *CCClient) doSend(ctx context.Context, body []byte, apiKey string) (*htt
 // produce: maximumCCMaxTokens is roughly 800 KB of text, and JSON escaping
 // inflates that further. Overshooting is reported as an error rather than
 // silently truncating the stream.
-const maxSSELineBytes = 32 * 1024 * 1024
+//
+// 4 MB leaves >4x headroom over the ~1 MB worst case above while keeping the
+// per-line ceiling low enough that a hostile or broken upstream cannot make a
+// single event allocate hundreds of MB. The previous 32 MB allowed one line to
+// amplify into ~200 MB of live allocation once parsed.
+const maxSSELineBytes = 4 * 1024 * 1024
 
-// readSSELine reads one newline-terminated line of any length.
+// maxSSEStreamBytes bounds the total payload of one upstream stream. Per-line
+// and per-event caps alone do not bound memory: an upstream may emit an
+// unlimited number of individually-legal events (and the authoritative
+// tool-call set is retained for the whole stream), so a stream-level ceiling is
+// what actually keeps a single request's footprint finite.
+const maxSSEStreamBytes = 64 * 1024 * 1024
+
+// readSSELine reads one newline-terminated line, up to maxSSELineBytes.
 //
 // bufio.Scanner cannot do this: a token larger than its buffer stops the scan
 // with ErrTooLong, so a single oversized tool-call event would discard every
 // event after it — including the finish event — and the client would see a
 // stream that just stops.
+//
+// The line is assembled in a []byte that grows geometrically from the reader's
+// own buffer size. A strings.Builder here re-copied the payload on every
+// doubling (56 MB moved to produce an 8 MB line); starting at the reader's
+// buffer size and using append keeps the copy count proportional to log(n).
 func readSSELine(r *bufio.Reader) (string, error) {
-	var line strings.Builder
-	for {
-		chunk, isPrefix, err := r.ReadLine()
-		if line.Len()+len(chunk) > maxSSELineBytes {
+	chunk, err := r.ReadSlice('\n')
+	if err == nil {
+		// Fast path: the whole line was already sitting in the reader's buffer.
+		// ReadSlice's slice is only valid until the next read, and callers keep
+		// the line across the callback that may read more, so copy exactly once.
+		return string(chunk), nil
+	}
+	if err != bufio.ErrBufferFull {
+		if len(chunk) > maxSSELineBytes {
 			return "", fmt.Errorf("sse line exceeds %d bytes", maxSSELineBytes)
 		}
-		line.Write(chunk)
-		if err != nil {
-			return line.String(), err
+		return string(chunk), err
+	}
+
+	buf := make([]byte, 0, len(chunk)*2)
+	buf = append(buf, chunk...)
+	for {
+		chunk, err = r.ReadSlice('\n')
+		if len(buf)+len(chunk) > maxSSELineBytes {
+			return "", fmt.Errorf("sse line exceeds %d bytes", maxSSELineBytes)
 		}
-		if !isPrefix {
-			return line.String(), nil
+		buf = append(buf, chunk...)
+		if err == nil {
+			return string(buf), nil
+		}
+		if err != bufio.ErrBufferFull {
+			return string(buf), err
 		}
 	}
 }
@@ -389,12 +421,18 @@ func parseStreamEvents(resp *http.Response, onEvent func(CCStreamEvent) error) (
 	reader := bufio.NewReaderSize(resp.Body, 64*1024)
 	var dataLines []string
 	dataBytes := 0
+	streamBytes := 0
 
 	dispatch := func() (bool, error) {
 		if len(dataLines) == 0 {
 			return false, nil
 		}
-		payload := strings.Join(dataLines, "\n")
+		var payload string
+		if len(dataLines) == 1 {
+			payload = dataLines[0]
+		} else {
+			payload = strings.Join(dataLines, "\n")
+		}
 		dataLines = nil
 		dataBytes = 0
 		if strings.TrimSpace(payload) == "" {
@@ -415,7 +453,16 @@ func parseStreamEvents(resp *http.Response, onEvent func(CCStreamEvent) error) (
 
 	for {
 		raw, readErr := readSSELine(reader)
-		line := strings.TrimSuffix(raw, "\r")
+		// TrimSuffix/TrimSpace copy the whole string when a trim is needed, so
+		// only touch the line when there is actually something to remove.
+		line := raw
+		if strings.HasSuffix(line, "\r") {
+			line = line[:len(line)-1]
+		}
+		streamBytes += len(line)
+		if streamBytes > maxSSEStreamBytes {
+			return 0, fmt.Errorf("sse stream exceeds %d bytes", maxSSEStreamBytes)
+		}
 
 		switch {
 		case line == "":
@@ -429,7 +476,7 @@ func parseStreamEvents(resp *http.Response, onEvent func(CCStreamEvent) error) (
 		case strings.HasPrefix(line, ":"):
 			// SSE comment/keep-alive.
 		case strings.HasPrefix(line, "data:"):
-			value := strings.TrimPrefix(line, "data:")
+			value := line[len("data:"):]
 			if strings.HasPrefix(value, " ") {
 				value = value[1:]
 			}

@@ -331,10 +331,24 @@ func (s UsageSnapshot) TotalTokens() int64 {
 
 // ====== persistence ======
 
-// usageFile is a var so tests can redirect persistence to a temp dir.
+// usageFile is retained so tests can point at a temp file; the running server
+// does not persist usage. Counters live in memory and reset on restart.
 var usageFile = "usage.json"
 
+// loadUsage returns empty in-memory counters. Usage is intentionally not
+// durable: there is no data volume, so a restart starts from zero.
 func loadUsage() *UsageTracker {
+	return &UsageTracker{}
+}
+
+// save is a no-op kept for callers that used to flush counters to disk.
+func (u *UsageTracker) save() error {
+	return nil
+}
+
+// loadUsageFile reads a persisted usage file. It backs the legacy on-disk
+// format and the tests that exercise it; the server does not call it.
+func loadUsageFile() *UsageTracker {
 	u := &UsageTracker{}
 	data, err := os.ReadFile(usageFile)
 	if err != nil {
@@ -369,7 +383,8 @@ func loadUsage() *UsageTracker {
 	return u
 }
 
-func (u *UsageTracker) save() error {
+// saveToFile writes the legacy on-disk shape. Used by tests only.
+func (u *UsageTracker) saveToFile() error {
 	u.saveMu.Lock()
 	defer u.saveMu.Unlock()
 

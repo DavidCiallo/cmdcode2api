@@ -152,7 +152,7 @@ func TestSaveConfigClearsLegacyClientKey(t *testing.T) {
 		{Name: "default", Key: "ccgw-a"},
 		{Name: "extra", Key: "ccgw-b"},
 	}
-	if err := saveConfig(path, cfg); err != nil {
+	if err := saveConfigFile(path, cfg); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(path)
@@ -210,11 +210,11 @@ func TestUsageSnapshotPersistsClientKeys(t *testing.T) {
 
 	usage := &UsageTracker{}
 	usage.Recorder("", "key-1").Record(5, 6, 0, 0)
-	if err := usage.save(); err != nil {
+	if err := usage.saveToFile(); err != nil {
 		t.Fatal(err)
 	}
 
-	reloaded := loadUsage()
+	reloaded := loadUsageFile()
 	if got := reloaded.ClientKeyUsage("key-1"); got.Requests != 1 || got.PromptTokens != 5 || got.CompletionTokens != 6 {
 		t.Fatalf("persisted client key usage = %+v", got)
 	}

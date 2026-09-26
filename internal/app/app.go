@@ -12,7 +12,9 @@ import (
 // Version is the program version, formatted as vX.Y.Z.
 const Version = "v0.2.0"
 
-// configFile is a var so tests can redirect config persistence to a temp dir.
+// configFile is only consulted for the optional legacy config-file import path
+// (used by `--oauth` and tests). The running server builds its configuration in
+// memory and never writes this path.
 var configFile = "config.yaml"
 
 func Run() {
@@ -43,9 +45,6 @@ func Run() {
 			if err != nil {
 				log.Fatalf("create config failed: %v", err)
 			}
-			if err := writeConfigTemplate(cfgPath, cfg2); err != nil {
-				log.Fatalf("create config failed: %v", err)
-			}
 			cfg = cfg2
 		}
 
@@ -57,7 +56,7 @@ func Run() {
 		// OAuth 追加账号而不是覆盖：重复执行即可接入多个账号。
 		pool := NewAccountPool(cfg.CommandCode.Accounts)
 		if acct := pool.Get(accountID(cb.APIKey)); acct != nil {
-			fmt.Printf("\nℹ️  API key already configured as account %q in %s\n", acct.Name, cfgPath)
+			fmt.Printf("\nℹ️  API key already configured as account %q\n", acct.Name)
 			return
 		}
 		name := cb.displayName()
@@ -68,66 +67,43 @@ func Run() {
 			log.Fatalf("add oauth account failed: %v", err)
 		}
 		pool.SyncToConfig(cfg)
-		if err := saveConfig(cfgPath, cfg); err != nil {
-			log.Fatalf("save config failed: %v", err)
-		}
 
-		fmt.Printf("\n✅ API key added as account %q in %s (%d account(s) total)\n", name, cfgPath, pool.Len())
-		fmt.Println("   You can now run cmdcode2api to start the server.")
+		// Without a data volume there is nowhere durable to put this key, so
+		// print it for use as COMMANDCODE_API_KEY instead of silently losing it.
+		fmt.Printf("\n✅ API key ready as account %q (%d account(s) total)\n", name, pool.Len())
+		fmt.Printf("\nThis build keeps state in memory only, so the key cannot be saved.\n")
+		fmt.Printf("Set it in the environment to keep using it after a restart:\n\n")
+		fmt.Printf("  COMMANDCODE_API_KEY=%s\n\n", cb.APIKey)
 		return
 	}
 
-	// 正常模式
+	// 正常模式。配置只存在于内存中：没有 config.yaml，也没有数据卷。
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
 		log.Fatalf("load config failed: %v", err)
 	}
-
-	// 首次运行 — 生成配置
 	if cfg == nil {
-		cfg2, err := defaultConfig()
+		cfg, err = defaultConfig()
 		if err != nil {
 			log.Fatalf("create config failed: %v", err)
 		}
-		if err := writeConfigTemplate(cfgPath, cfg2); err != nil {
-			log.Fatalf("create config failed: %v", err)
-		}
-		fmt.Printf(`cmdcode2api initialized.
+		fmt.Printf(`cmdcode2api is starting with a fresh in-memory configuration.
 
-Created config: %s
+There is no config file and no data volume: accounts and client keys added
+in the WebUI live in memory only and are lost when the process restarts.
+
 Local client key: %s
 WebUI admin password: %s
 
-Next:
-  1. Run ./cmdcode2api --oauth to connect Command Code.
-  2. Run ./cmdcode2api again to start the local OpenAI-compatible API.
-
-Alternatively, just start the server — it comes up without an account, and
-you can add one in the WebUI at /webui with the admin password above.
-
-Use the local client key above as the Bearer token for your OpenAI client.
-`, cfgPath, cfg2.APIKeys[0].Key, cfg2.AdminPassword)
-		os.Exit(0)
+To keep these stable across restarts, set CLIENT_API_KEY and ADMIN_PASSWORD
+in the environment (and COMMANDCODE_API_KEY for an upstream account).
+`, cfg.APIKeys[0].Key, cfg.adminPassword())
 	}
 
 	// 没有上游账号也照常启动：WebUI/客户端密钥/设置均可用，
 	// chat 请求会返回 503 no_accounts，直到在 WebUI 添加账号。
 	if len(cfg.CommandCode.Accounts) == 0 {
 		log.Printf("[WARN] no Command Code accounts configured; chat requests will return 503 until an account is added via the WebUI (/webui) or --oauth")
-	}
-
-	// WebUI 管理密码为空时生成一个，只打印一次
-	adminPasswordGenerated := false
-	if cfg.adminPassword() == "" {
-		password, err := genAdminPassword()
-		if err != nil {
-			log.Fatalf("generate admin password failed: %v", err)
-		}
-		cfg.setAdminPassword(password)
-		if err := saveConfig(cfgPath, cfg); err != nil {
-			log.Fatalf("save config failed: %v", err)
-		}
-		adminPasswordGenerated = true
 	}
 
 	if cfg.Port == 0 {
@@ -165,15 +141,9 @@ Use the local client key above as the Bearer token for your OpenAI client.
 	}
 
 	log.Printf("accounts: %d configured, %d enabled", pool.Len(), pool.EnabledCount())
-	if adminPasswordGenerated {
-		fmt.Printf("WebUI admin password generated: %s\n", cfg.adminPassword())
-	}
 
 	if err := runServer(cc, cfg, usage, ring); err != nil {
 		log.Fatalf("server failed: %v", err)
-	}
-	if err := usage.save(); err != nil {
-		log.Printf("save usage failed: %v", err)
 	}
 }
 

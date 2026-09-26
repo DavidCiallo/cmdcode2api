@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -8,6 +9,12 @@ import (
 
 // logRingCapacity bounds the in-memory log tail exposed to the WebUI.
 const logRingCapacity = 500
+
+// maxLogLineBytes bounds one retained log line. The ring is bounded by line
+// count, which alone does not bound memory: a single debug line echoing a large
+// request body or SSE event could otherwise pin megabytes for as long as it
+// stays in the ring.
+const maxLogLineBytes = 16 * 1024
 
 type logEntry struct {
 	Seq  int64     `json:"seq"`
@@ -35,6 +42,9 @@ func (r *logRing) Write(p []byte) (int, error) {
 	line = stripANSI(line)
 	if strings.TrimSpace(line) == "" {
 		return len(p), nil
+	}
+	if len(line) > maxLogLineBytes {
+		line = line[:maxLogLineBytes] + fmt.Sprintf("... [%d bytes truncated]", len(line)-maxLogLineBytes)
 	}
 
 	r.mu.Lock()

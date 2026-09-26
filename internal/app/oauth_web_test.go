@@ -74,11 +74,6 @@ func TestWebOAuthCallbackFlow(t *testing.T) {
 	if pool.Get(accountID("cc-oauth-key")) == nil {
 		t.Fatal("account not in pool")
 	}
-
-	saved := loadConfigForTest(t)
-	if len(saved.CommandCode.Accounts) != 1 || saved.CommandCode.Accounts[0].APIKey != "cc-oauth-key" {
-		t.Fatalf("persisted accounts = %+v", saved.CommandCode.Accounts)
-	}
 	_ = cfg
 
 	// A flow that is no longer pending rejects further callbacks.
@@ -197,18 +192,7 @@ func TestWebOAuthCompleteFromPastedLink(t *testing.T) {
 		t.Fatalf("complete = %v", body)
 	}
 	if pool.Get(accountID("user_pasted")) == nil {
-		t.Fatal("account not in pool after paste")
-	}
-
-	saved := loadConfigForTest(t)
-	found := false
-	for _, a := range saved.CommandCode.Accounts {
-		if a.APIKey == "user_pasted" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("pasted account was not persisted: %+v", saved.CommandCode.Accounts)
+		t.Fatal("pasted account was not added to the pool")
 	}
 
 	// The single-use link cannot be replayed.

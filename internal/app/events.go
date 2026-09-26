@@ -30,7 +30,7 @@ type normalizedCCEvent struct {
 }
 
 type ccEventNormalizer struct {
-	toolInputBuf map[string]string
+	toolInputBuf map[string]*strings.Builder
 	// toolInputOrder makes finish-time provisional cleanup deterministic.
 	toolInputOrder []string
 	toolCalls      toolCallDeduper
@@ -42,7 +42,7 @@ type ccEventNormalizer struct {
 }
 
 func newCCEventNormalizer() *ccEventNormalizer {
-	return &ccEventNormalizer{toolInputBuf: make(map[string]string)}
+	return &ccEventNormalizer{toolInputBuf: make(map[string]*strings.Builder)}
 }
 
 func (n *ccEventNormalizer) Consume(ev CCStreamEvent) ([]normalizedCCEvent, error) {
@@ -66,7 +66,6 @@ func (n *ccEventNormalizer) Consume(ev CCStreamEvent) ([]normalizedCCEvent, erro
 			return nil, fmt.Errorf("tool-input-start missing tool call id")
 		}
 		n.trackToolInput(id)
-		n.toolInputBuf[id] = ""
 		return nil, nil
 	case "tool-input-delta":
 		id := eventToolCallID(ev)
@@ -74,7 +73,10 @@ func (n *ccEventNormalizer) Consume(ev CCStreamEvent) ([]normalizedCCEvent, erro
 			return nil, fmt.Errorf("tool-input-delta missing tool call id")
 		}
 		n.trackToolInput(id)
-		n.toolInputBuf[id] += ev.Delta
+		// Accumulate through a Builder: this buffer is only validated and then
+		// discarded at tool-input-end/finish, so repeated string concatenation
+		// reallocated the whole payload per delta for no retained benefit.
+		n.toolInputBuf[id].WriteString(ev.Delta)
 		return nil, nil
 	case "tool-input-end", "tool-input-available":
 		// These events are only provisional telemetry. Validate and discard the
@@ -186,7 +188,7 @@ func (n *ccEventNormalizer) trackToolInput(id string) {
 	if _, seen := n.toolInputBuf[id]; seen {
 		return
 	}
-	n.toolInputBuf[id] = ""
+	n.toolInputBuf[id] = &strings.Builder{}
 	n.toolInputOrder = append(n.toolInputOrder, id)
 }
 
@@ -208,8 +210,8 @@ func (n *ccEventNormalizer) finishToolInput(ev CCStreamEvent) error {
 	raw, tracked := n.toolInputBuf[id]
 	n.forgetToolInput(id)
 
-	if raw != "" {
-		if _, err := normalizeToolInput(raw); err != nil {
+	if raw != nil && raw.Len() > 0 {
+		if _, err := normalizeToolInput(raw.String()); err != nil {
 			return fmt.Errorf("normalize provisional tool input %q: %w", id, err)
 		}
 		return nil
@@ -369,18 +371,25 @@ func eventToolInput(ev CCStreamEvent) (any, bool) {
 
 type toolCallDeduper struct {
 	kept []ToolCall
+	// index maps tool-call ID to its slot in kept, so Add is O(1) instead of
+	// rescanning every retained call (and copying its arguments) per event.
+	index map[string]int
 }
 
 // Add deduplicates authoritative calls by stable tool-call id while preserving
 // first-seen order.
 func (d *toolCallDeduper) Add(candidate ToolCall) bool {
-	for i, existing := range d.kept {
-		if existing.ID != "" && existing.ID == candidate.ID {
-			if candidate.source > existing.source {
+	if candidate.ID != "" {
+		if d.index == nil {
+			d.index = make(map[string]int, 4)
+		}
+		if i, ok := d.index[candidate.ID]; ok {
+			if candidate.source > d.kept[i].source {
 				d.kept[i] = candidate
 			}
 			return false
 		}
+		d.index[candidate.ID] = len(d.kept)
 	}
 	d.kept = append(d.kept, candidate)
 	return true

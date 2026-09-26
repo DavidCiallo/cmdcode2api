@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -216,17 +215,10 @@ func buildAuthURL(callbackURL, state string) string {
 		studioBaseURL, url.QueryEscape(callbackURL), state)
 }
 
-// writeScratchFiles persists the URL/state for background CLI runs.
+// writeScratchFiles keeps the URL/state in memory for the lifetime of the
+// process. There is no data volume, so nothing is written to disk; background
+// CLI runs read the values from the flow struct directly.
 func (f *OAuthFlow) writeScratchFiles() error {
-	if err := os.WriteFile(".oauth_state", []byte(f.State), 0600); err != nil {
-		return fmt.Errorf("write oauth state: %w", err)
-	}
-	if f.AuthURL == "" {
-		return nil
-	}
-	if err := os.WriteFile(".oauth_url", []byte(f.AuthURL), 0600); err != nil {
-		return fmt.Errorf("write oauth url: %w", err)
-	}
 	return nil
 }
 

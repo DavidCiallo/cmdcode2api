@@ -2,7 +2,9 @@ package app
 
 import (
 	"fmt"
+	"log"
 	"os"
+	"strings"
 	"sync"
 
 	"gopkg.in/yaml.v3"
@@ -102,25 +104,52 @@ func (c *Config) setAdminPassword(password string) {
 	c.AdminPassword = password
 }
 
+// defaultConfig builds the initial in-memory configuration.
+//
+// The gateway is deliberately stateless: there is no config file and no data
+// volume. Accounts and client keys are added at runtime through the WebUI and
+// live only in memory, so a restart starts clean. The admin password is taken
+// from ADMIN_PASSWORD when set so a redeploy keeps a stable credential;
+// otherwise a random one is generated and printed once.
 func defaultConfig() (*Config, error) {
-	apiKey, err := genAPIKey()
-	if err != nil {
-		return nil, err
+	adminPassword := os.Getenv("ADMIN_PASSWORD")
+	if adminPassword == "" {
+		generated, err := genAdminPassword()
+		if err != nil {
+			return nil, err
+		}
+		adminPassword = generated
+	} else if len(strings.TrimSpace(adminPassword)) < 8 {
+		// The admin API refuses passwords this short, so warn rather than
+		// silently accepting a credential that cannot be changed back to itself.
+		log.Printf("[WARN] ADMIN_PASSWORD is shorter than 8 characters; the admin API requires at least 8 when changing it")
 	}
-	adminPassword, err := genAdminPassword()
-	if err != nil {
-		return nil, err
-	}
-	// 生成的客户端密钥只写入 api_keys 列表；旧字段 api_key 仅用于兼容
-	// 已有的手工配置，不再出现在新生成的文件里。
+
 	c := &Config{
 		AdminPassword: adminPassword,
 		Host:          "localhost",
 		Port:          11434,
 		ExcludeModels: []string{"gpt-", "claude-", "gemini-"},
 	}
-	c.APIKeys = []ClientKeyConfig{{Name: "default", Key: apiKey}}
 	c.CommandCode.BaseURL = "https://api.commandcode.ai"
+
+	// An upstream account and a local client key may be seeded from the
+	// environment for deployments that want a working gateway without opening
+	// the WebUI first. Both are optional; without them the server still starts
+	// and chat requests return 503 until an account is added.
+	if key := os.Getenv("COMMANDCODE_API_KEY"); key != "" {
+		c.CommandCode.Accounts = []AccountConfig{{Name: "default", APIKey: key}}
+	}
+	if key := os.Getenv("CLIENT_API_KEY"); key != "" {
+		c.APIKeys = []ClientKeyConfig{{Name: "default", Key: key}}
+	} else {
+		// No configured client key: mint one so the API is usable immediately.
+		apiKey, err := genAPIKey()
+		if err != nil {
+			return nil, err
+		}
+		c.APIKeys = []ClientKeyConfig{{Name: "default", Key: apiKey}}
+	}
 	return c, nil
 }
 
@@ -137,8 +166,12 @@ func genAdminPassword() (string, error) {
 	return randomPassword(12)
 }
 
-// loadConfig reads config.yaml and migrates the legacy single-key fields into
-// the accounts and client-keys lists.
+// loadConfig is retained for the config-file migration path used by tests and
+// one-off tooling. The running server does not call it: runtime configuration
+// is built in memory by defaultConfig.
+//
+// It reads a YAML config and migrates the legacy single-key fields into the
+// accounts and client-keys lists.
 func loadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -160,10 +193,32 @@ func loadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// saveConfig is a no-op: configuration lives only in memory, so admin edits
+// take effect immediately and are intentionally lost on restart.
+//
+// The signature (and error return) is kept so every admin handler that used to
+// persist state still reports success without pretending to write a file.
 func saveConfig(path string, cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
 	cfg.mu.Lock()
-	// Non-empty lists are the source of truth; keeping the legacy fields
-	// would resurrect deleted keys on the next load.
+	// Non-empty lists are the source of truth; keeping the legacy fields would
+	// resurrect deleted keys if a config is ever exported from this state.
+	if len(cfg.CommandCode.Accounts) > 0 {
+		cfg.CommandCode.APIKey = ""
+	}
+	if len(cfg.APIKeys) > 0 {
+		cfg.APIKey = ""
+	}
+	cfg.mu.Unlock()
+	return nil
+}
+
+// saveConfigFile writes the legacy YAML config. Kept for tests and for tooling
+// that exports configuration; the server does not call it.
+func saveConfigFile(path string, cfg *Config) error {
+	cfg.mu.Lock()
 	if len(cfg.CommandCode.Accounts) > 0 {
 		cfg.CommandCode.APIKey = ""
 	}
@@ -178,6 +233,8 @@ func saveConfig(path string, cfg *Config) error {
 	return os.WriteFile(path, data, 0600)
 }
 
+// writeConfigTemplate is retained for tests; the server no longer writes a
+// config file on first start.
 func writeConfigTemplate(path string, cfg *Config) error {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {

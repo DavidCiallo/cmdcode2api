@@ -112,13 +112,9 @@ func TestAdminAccountLifecycle(t *testing.T) {
 		t.Fatalf("duplicate status = %d, want 409", resp.StatusCode)
 	}
 
-	// Persisted to config.yaml
-	saved, err := loadConfig(configFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(saved.CommandCode.Accounts) != 1 || saved.CommandCode.Accounts[0].APIKey != "cc-key-1" {
-		t.Fatalf("persisted accounts = %+v", saved.CommandCode.Accounts)
+	// Held in memory (this build has no config file or data volume).
+	if got := pool.Get(accountID("cc-key-1")); got == nil {
+		t.Fatalf("added account missing from pool (len=%d)", pool.Len())
 	}
 
 	// List
@@ -230,15 +226,9 @@ func TestAdminSettingsPut(t *testing.T) {
 		t.Fatal("admin password not updated")
 	}
 
-	saved, err := loadConfig(configFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if saved.CommandCode.BaseURL != "https://api2.commandcode.test" {
-		t.Fatalf("persisted base_url = %q", saved.CommandCode.BaseURL)
-	}
-	if len(saved.CommandCode.Accounts) != 1 {
-		t.Fatalf("settings save must not lose accounts: %+v", saved.CommandCode.Accounts)
+	// Settings are held in memory; accounts must survive the update.
+	if len(cfg.CommandCode.Accounts) != 1 {
+		t.Fatalf("settings update must not lose accounts: %+v", cfg.CommandCode.Accounts)
 	}
 
 	// Old password no longer works.
@@ -317,13 +307,9 @@ func TestAdminClientKeyLifecycle(t *testing.T) {
 		t.Fatalf("reveal = %v, want the created key", payload)
 	}
 
-	// Persisted to config.yaml.
-	saved, err := loadConfig(configFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(saved.APIKeys) != 2 || saved.APIKey != "" {
-		t.Fatalf("persisted keys = %+v (legacy = %q)", saved.APIKeys, saved.APIKey)
+	// Held in memory (no config file in this build).
+	if got := keys.Len(); got != 2 {
+		t.Fatalf("client keys = %d, want 2", got)
 	}
 
 	// Disable.
@@ -393,13 +379,20 @@ func TestAccountTestKeyProbe(t *testing.T) {
 	}
 }
 
-func TestConfigFileRedirectedForAdminPersistence(t *testing.T) {
-	// Guards against admin handlers accidentally writing into the package dir.
-	srv, _, _, _, _, _ := newAdminTestEnv(t)
+// TestAdminPersistenceWritesNoFiles asserts the stateless contract: admin
+// handlers mutate in-memory state and must not create files anywhere. This
+// replaces an earlier test that required config.yaml to be written, which is
+// exactly the behavior this build removed.
+func TestAdminPersistenceWritesNoFiles(t *testing.T) {
+	srv, pool, _, _, _, _ := newAdminTestEnv(t)
 	adminRequest(t, srv, "POST", "/admin/api/accounts", "admin-pass-123",
 		map[string]any{"name": "x", "api_key": "cc-k"})
-	if _, err := os.Stat(configFile); err != nil {
-		t.Fatalf("config file not written: %v", err)
+
+	if pool.Get(accountID("cc-k")) == nil {
+		t.Fatal("account was not added to the in-memory pool")
+	}
+	if _, err := os.Stat(configFile); err == nil {
+		t.Fatalf("admin handlers must not write %s in a stateless build", configFile)
 	}
 }
 

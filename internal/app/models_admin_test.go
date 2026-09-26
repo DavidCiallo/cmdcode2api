@@ -91,15 +91,9 @@ func TestAdminAccountPatchKeyMovesUsage(t *testing.T) {
 		t.Fatalf("moved usage = %+v", got)
 	}
 
-	saved := loadConfigForTest(t)
-	found := false
-	for _, a := range saved.CommandCode.Accounts {
-		if a.APIKey == "cc-new-key" && a.Name == "main" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("persisted accounts missing updated key: %+v", saved.CommandCode.Accounts)
+	// The updated credential now serves the account (state is in memory only).
+	if got := pool.Get(newID); got == nil || got.APIKey != "cc-new-key" {
+		t.Fatalf("account key not updated in memory: %+v", got)
 	}
 
 	// Patching to a key owned by another account is rejected.
@@ -126,11 +120,17 @@ func TestOAuthDisplayNamePrefersUser(t *testing.T) {
 	}
 }
 
+// loadConfigForTest reads the legacy on-disk config, returning an empty Config
+// when the file is absent. The server no longer writes one, so a missing file
+// is the normal case rather than an error.
 func loadConfigForTest(t *testing.T) *Config {
 	t.Helper()
 	cfg, err := loadConfig(configFile)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if cfg == nil {
+		return &Config{}
 	}
 	return cfg
 }

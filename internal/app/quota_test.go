@@ -459,11 +459,11 @@ func TestUsageSnapshotPersistsQuotas(t *testing.T) {
 		Plan:           &QuotaPlan{Name: "Pro", MonthlyCredits: floatPtr(80)},
 		FiveHour:       &QuotaWindow{Used: 4, Cap: 10},
 	})
-	if err := usage.save(); err != nil {
+	if err := usage.saveToFile(); err != nil {
 		t.Fatal(err)
 	}
 
-	reloaded := loadUsage()
+	reloaded := loadUsageFile()
 	snap := reloaded.Quota("a1")
 	if snap == nil {
 		t.Fatal("quota not persisted")

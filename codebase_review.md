@@ -94,3 +94,26 @@ git log --all -- config.yaml .oauth_state .oauth_url
 ## 总结
 
 代码库已经适合作为一个小型本地网关继续迭代。当前报告中发现的主要结构性问题已经处理，剩余工作主要是继续补充更细的转换逻辑测试。
+
+---
+
+## 变更说明：转为纯内存无状态运行（2026-09-26）
+
+上面第 49 和 58 条描述的持久化策略已被**整体移除**。网关现在完全无状态，没有配置文件、没有数据卷、没有磁盘写入：
+
+- **不再有 `config.yaml`**。配置在启动时由 `defaultConfig()` 在内存中构建，服务既不读也不写该文件。`saveConfig` 保留签名但不再落盘；`loadConfig` 仅供测试与一次性工具使用。
+- **不再有 `usage.json`**。用量计数与额度快照仅存在于内存，重启即归零。`loadUsage()` 返回空计数器，`save()` 是空操作。旧的磁盘格式由 `loadUsageFile` / `saveToFile` 保留给测试。
+- **不再有 `.oauth_state` / `.oauth_url`**。OAuth 流程不再写临时文件；成功后不再追加账号到配置文件，而是把 Key 打印出来供写入 `COMMANDCODE_API_KEY`。
+- **首次运行不再 `os.Exit(0)`**。此前「生成配置后主动退出」在容器里会被判定为异常终止并触发重启循环；现在无论是否有配置都会继续启动 HTTP 服务。
+- **配置来源改为环境变量**：`ADMIN_PASSWORD`、`COMMANDCODE_API_KEY`、`CLIENT_API_KEY`、`GOMEMLIMIT`。账号与客户端密钥在 WebUI 中运行时添加，进程重启后丢失。
+
+因此第 77-81 行列出的本地产物只剩 `/cmdcode2api` 二进制，第 86 行的历史排查命令也已无对象。Dockerfile 移除了 `WORKDIR /data` 与 `VOLUME /data`。
+
+### 同时修复的内存放大问题
+
+- `maxSSELineBytes` 由 32 MB 降至 4 MB，并新增 `maxSSEStreamBytes`（64 MB）限制单条流总量。
+- `readSSELine` 改为按需增长的 `[]byte`，避免 `strings.Builder` 在 MB 级行上反复翻倍拷贝。
+- debug 日志新增 8 KB 截断（`truncateForLog`），不再打印完整请求体/事件，也不再对每个事件做 `json.Marshal`。
+- `logRing` 新增 16 KB 单行上限：此前只按 500 行计数，一行可以任意大。
+- `toolCallDeduper` 改用 map 索引，去掉 O(n²) 扫描；provisional tool-input 缓冲改用 `strings.Builder` 写入（该数据最终会被丢弃）。
+

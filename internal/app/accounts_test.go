@@ -141,7 +141,7 @@ func TestSaveConfigClearsLegacyKeyWhenAccountsExist(t *testing.T) {
 	cfg := &Config{APIKey: "ccgw-local"}
 	cfg.CommandCode.APIKey = "cc-legacy"
 	cfg.CommandCode.Accounts = []AccountConfig{{Name: "main", APIKey: "cc-new"}}
-	if err := saveConfig(path, cfg); err != nil {
+	if err := saveConfigFile(path, cfg); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(path)
@@ -325,11 +325,11 @@ func TestUsageSnapshotPersistsAccounts(t *testing.T) {
 
 	usage := &UsageTracker{}
 	usage.ForAccount(newAccount("main", "key-a", true)).Record(5, 6, 0, 0)
-	if err := usage.save(); err != nil {
+	if err := usage.saveToFile(); err != nil {
 		t.Fatal(err)
 	}
 
-	reloaded := loadUsage()
+	reloaded := loadUsageFile()
 	acc := reloaded.AccountUsage(accountID("key-a"))
 	if acc.Requests != 1 || acc.PromptTokens != 5 || acc.CompletionTokens != 6 {
 		t.Fatalf("persisted account usage = %+v", acc)

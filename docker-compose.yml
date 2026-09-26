@@ -1,0 +1,33 @@
+# Stateless deployment: no data volume, no config file.
+#
+# Nothing is persisted. Accounts and client keys are added in the WebUI and live
+# in memory only, so every restart starts clean and chat requests return 503
+# until an account is added again. Set the environment variables below to get a
+# stable admin password and (optionally) a pre-seeded account and client key.
+#
+#   docker compose up -d
+#   WebUI: http://<host>:11434/webui
+
+services:
+  cmdcode2api:
+    image: ghcr.io/peach0x33a/cmdcode2api:latest
+    container_name: cmdcode2api
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    environment:
+      # Stable admin password for the WebUI. If unset, one is generated on
+      # every start and printed to the logs.
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      # Optional: an upstream Command Code key, so the gateway works without
+      # opening the WebUI first.
+      - COMMANDCODE_API_KEY=${COMMANDCODE_API_KEY:-}
+      # Optional: a fixed local bearer key for clients. If unset, one is
+      # generated on every start and printed to the logs.
+      - CLIENT_API_KEY=${CLIENT_API_KEY:-}
+      # Go soft memory limit: makes the GC work harder near the cap and keeps
+      # streaming buffers from growing unbounded under concurrent load.
+      - GOMEMLIMIT=${GOMEMLIMIT:-512MiB}
+    # Uncomment to hard-cap the container as well.
+    # mem_limit: 768m
+    # WebUI: http://<host>:11434/webui
