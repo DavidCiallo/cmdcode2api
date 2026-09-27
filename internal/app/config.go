@@ -57,11 +57,40 @@ type Config struct {
 	} `yaml:"commandcode"`
 
 	ExcludeModels []string `yaml:"exclude_models"`
-	Debug         bool     `yaml:"-"` // runtime flag, not persisted
+	// AccountStrategy selects how requests are spread across accounts:
+	// "round_robin" (default) or "priority" (drain the earliest account in the
+	// list, then move to the next). Empty means round_robin.
+	AccountStrategy string `yaml:"account_strategy,omitempty"`
+	Debug           bool   `yaml:"-"` // runtime flag, not persisted
 
 	// mu guards the fields that the admin API mutates while request handlers
 	// read them (ExcludeModels, CommandCode.BaseURL, AdminPassword).
 	mu sync.RWMutex
+}
+
+// SelectionStrategy maps the configured account_strategy to a pool strategy.
+// Unknown values fall back to round-robin rather than failing startup.
+func (c *Config) SelectionStrategy() SelectionStrategy {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return parseSelectionStrategy(c.AccountStrategy)
+}
+
+func parseSelectionStrategy(value string) SelectionStrategy {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "priority", "sequential", "failover":
+		return StrategyPriority
+	default:
+		return StrategyRoundRobin
+	}
+}
+
+// SetAccountStrategy records the strategy in canonical form so a subsequent
+// read reports exactly what the pool is doing.
+func (c *Config) SetAccountStrategy(value string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.AccountStrategy = parseSelectionStrategy(value).String()
 }
 
 func (c *Config) WebUIEnabled() bool {
@@ -130,6 +159,10 @@ func defaultConfig() (*Config, error) {
 		Host:          "localhost",
 		Port:          11434,
 		ExcludeModels: []string{"gpt-", "claude-", "gemini-"},
+		// Default to priority when the deployment opts in via the environment:
+		// draining one account before the next is the common request when a
+		// plan is prepaid. Round-robin stays the default otherwise.
+		AccountStrategy: os.Getenv("ACCOUNT_STRATEGY"),
 	}
 	c.CommandCode.BaseURL = "https://api.commandcode.ai"
 

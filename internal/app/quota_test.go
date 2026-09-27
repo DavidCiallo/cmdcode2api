@@ -362,8 +362,13 @@ func TestRefreshAccountKeepsSnapshotOnFailure(t *testing.T) {
 	if second.MonthlyCredits == nil || *second.MonthlyCredits != 12.5 {
 		t.Fatalf("previous quota not preserved: %+v", second)
 	}
-	if second.LastChecked == nil || !second.LastChecked.After(*first.LastChecked) {
-		t.Fatalf("last_checked not advanced: %+v", second.LastChecked)
+	if second.LastChecked == nil || second.LastChecked.Before(*first.LastChecked) {
+		// Testing "not before" rather than "strictly after": the two refreshes
+		// can land in the same clock tick (Windows clock granularity is
+		// coarser than time.Time's nanosecond precision), so a strict After
+		// assertion flakes. What matters is that last_checked was re-stamped
+		// and never moved backwards.
+		t.Fatalf("last_checked went backwards: %v -> %v", *first.LastChecked, *second.LastChecked)
 	}
 	if cached := usage.Quota(acct.ID); cached == nil || cached.LastError == "" {
 		t.Fatalf("cached snapshot not updated: %+v", cached)

@@ -241,10 +241,14 @@ func (c *CCClient) Send(ctx context.Context, req *ChatRequest) (*http.Response, 
 
 	wait := pool.EarliestRateLimitWait(time.Now()).Round(time.Second)
 	retryAfter := ""
-	message := "all Command Code accounts are rate limited"
-	if wait > 0 {
+	message := "no Command Code account is currently available"
+	switch {
+	case wait > 0:
 		retryAfter = strconv.FormatInt(int64(wait.Seconds()), 10)
-		message += fmt.Sprintf("; next account available in %s", wait)
+		message = fmt.Sprintf("all Command Code accounts are rate limited; next account available in %s", wait)
+	case pool.AllExhausted():
+		// Every enabled account is out of credits according to upstream quota.
+		message = "all Command Code accounts are out of quota"
 	}
 	return nil, nil, &upstreamAPIError{
 		Status:     http.StatusTooManyRequests,

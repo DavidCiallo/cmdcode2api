@@ -130,9 +130,14 @@ in the environment (and COMMANDCODE_API_KEY for an upstream account).
 	ring := newLogRing()
 	log.SetOutput(io.MultiWriter(os.Stderr, ring))
 
-	pool := NewAccountPool(cfg.CommandCode.Accounts)
-	cc := NewCCClientWithPool(pool, cfg.UpstreamBaseURL())
+	// usage is created first: the pool consults its quota cache to skip
+	// accounts upstream reports as exhausted.
 	usage := loadUsage()
+	pool := NewAccountPool(cfg.CommandCode.Accounts,
+		WithStrategy(cfg.SelectionStrategy()),
+		WithQuotaSource(usage),
+	)
+	cc := NewCCClientWithPool(pool, cfg.UpstreamBaseURL())
 
 	if primary := pool.Primary(); primary != nil {
 		FetchProviderModels(cfg.UpstreamBaseURL(), primary.APIKey)
@@ -140,7 +145,8 @@ in the environment (and COMMANDCODE_API_KEY for an upstream account).
 		log.Printf("[WARN] no enabled Command Code accounts; starting with an empty model catalog")
 	}
 
-	log.Printf("accounts: %d configured, %d enabled", pool.Len(), pool.EnabledCount())
+	log.Printf("accounts: %d configured, %d enabled (strategy: %s)",
+		pool.Len(), pool.EnabledCount(), cfg.SelectionStrategy())
 
 	if err := runServer(cc, cfg, usage, ring); err != nil {
 		log.Fatalf("server failed: %v", err)

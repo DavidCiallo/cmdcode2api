@@ -153,15 +153,72 @@ func (a *Account) View() AccountView {
 	return view
 }
 
+// SelectionStrategy decides how Acquire orders eligible accounts.
+type SelectionStrategy uint8
+
+const (
+	// StrategyRoundRobin rotates evenly across accounts. This is the default:
+	// with no quota data it spreads load and rate limits across the pool.
+	StrategyRoundRobin SelectionStrategy = iota
+	// StrategyPriority always prefers the earliest account in the configured
+	// list, moving on only when that account becomes unusable (disabled, rate
+	// limited, or reported exhausted by upstream quota). Use this to drain one
+	// account before touching the next.
+	StrategyPriority
+)
+
+// String renders the strategy name, so logs and error messages are readable.
+func (s SelectionStrategy) String() string {
+	switch s {
+	case StrategyPriority:
+		return "priority"
+	case StrategyRoundRobin:
+		return "round_robin"
+	default:
+		return "unknown"
+	}
+}
+
+// QuotaSource reports whether an account is currently exhausted. It is
+// satisfied by UsageTracker; keeping it an interface avoids a dependency cycle
+// and lets tests supply a stub.
+type QuotaSource interface {
+	AccountBlocked(id string) bool
+}
+
 // AccountPool holds the configured upstream accounts and rotates between them.
 type AccountPool struct {
 	mu       sync.RWMutex
 	accounts []*Account
 	cursor   atomic.Uint64
+
+	// strategy and quota are set once during construction (via the options)
+	// and read on every Acquire.
+	strategy SelectionStrategy
+	quota    QuotaSource
 }
 
-func NewAccountPool(list []AccountConfig) *AccountPool {
+// PoolOption customises a pool at construction time.
+type PoolOption func(*AccountPool)
+
+// WithStrategy selects how Acquire orders eligible accounts.
+func WithStrategy(s SelectionStrategy) PoolOption {
+	return func(p *AccountPool) { p.strategy = s }
+}
+
+// WithQuotaSource supplies the quota cache Acquire consults to skip accounts
+// that upstream reports as exhausted.
+func WithQuotaSource(q QuotaSource) PoolOption {
+	return func(p *AccountPool) { p.quota = q }
+}
+
+func NewAccountPool(list []AccountConfig, opts ...PoolOption) *AccountPool {
 	pool := &AccountPool{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(pool)
+		}
+	}
 	for _, ac := range list {
 		if strings.TrimSpace(ac.APIKey) == "" {
 			continue
@@ -171,9 +228,48 @@ func NewAccountPool(list []AccountConfig) *AccountPool {
 	return pool
 }
 
-// Acquire picks the next eligible account in round-robin order. Disabled and
-// rate-limited accounts are skipped; nil means every enabled account is
-// currently rate limited (or the pool is empty).
+// Strategy reports the pool's selection strategy.
+func (p *AccountPool) Strategy() SelectionStrategy {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.strategy
+}
+
+// SetStrategy changes the selection strategy at runtime. It takes effect on the
+// next Acquire, so the WebUI can switch between spreading load and draining one
+// account without a restart.
+func (p *AccountPool) SetStrategy(s SelectionStrategy) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.strategy = s
+}
+
+// eligible reports whether an account can serve a request right now.
+// exhausted is consulted separately so callers can distinguish "busy" from
+// "out of credits" when reporting why nothing was available.
+func (p *AccountPool) eligible(a *Account, now time.Time) bool {
+	return a.Enabled && !a.RateLimited(now)
+}
+
+// exhausted reports whether quota data says an account is out of credits. A
+// missing snapshot is never treated as exhausted: absence of data must not take
+// an account out of rotation.
+func (p *AccountPool) exhausted(a *Account) bool {
+	if p.quota == nil {
+		return false
+	}
+	return p.quota.AccountBlocked(a.ID)
+}
+
+// Acquire picks the next eligible account.
+//
+// Round-robin advances an atomic cursor and skips disabled, rate-limited, and
+// exhausted accounts. Priority walks the configured list in order and returns
+// the first usable account, so its earliest entry is drained before later ones
+// are touched.
+//
+// nil means no account can serve right now: either the pool is empty, or every
+// enabled account is rate limited or exhausted.
 func (p *AccountPool) Acquire() *Account {
 	now := time.Now()
 	p.mu.RLock()
@@ -183,10 +279,22 @@ func (p *AccountPool) Acquire() *Account {
 	if n == 0 {
 		return nil
 	}
+
+	if p.strategy == StrategyPriority {
+		for i := 0; i < n; i++ {
+			a := p.accounts[i]
+			if !p.eligible(a, now) || p.exhausted(a) {
+				continue
+			}
+			return a
+		}
+		return nil
+	}
+
 	start := int((p.cursor.Add(1) - 1) % uint64(n))
 	for i := 0; i < n; i++ {
 		a := p.accounts[(start+i)%n]
-		if !a.Enabled || a.RateLimited(now) {
+		if !p.eligible(a, now) || p.exhausted(a) {
 			continue
 		}
 		return a
@@ -326,6 +434,25 @@ func (p *AccountPool) SetKey(id, newKey string) (string, error) {
 	a.ID = newID
 	a.mu.Unlock()
 	return newID, nil
+}
+
+// AllExhausted reports whether every enabled account is currently blocked by
+// quota data. Used only to describe why nothing was available, so an empty pool
+// reports false.
+func (p *AccountPool) AllExhausted() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	enabled := 0
+	for _, a := range p.accounts {
+		if !a.Enabled {
+			continue
+		}
+		enabled++
+		if !p.exhausted(a) {
+			return false
+		}
+	}
+	return enabled > 0
 }
 
 // EarliestRateLimitWait reports how long until the first rate-limited account

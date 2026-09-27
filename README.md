@@ -7,7 +7,7 @@
 ## Features
 
 - OpenAI-compatible `POST /v1/chat/completions` (streaming and non-streaming) and `GET /v1/models`
-- Multiple Command Code accounts with round-robin rotation and automatic failover (`401`/`403`/`429`/5xx), including per-account 429 cooldown
+- Multiple Command Code accounts with a selectable selection strategy (round-robin rotation or prioritized draining), quota-aware skipping, and automatic failover (`401`/`403`/`429`/5xx), including per-account 429 cooldown
 - Multiple local client API keys with per-key request and token accounting
 - Command Code quota dashboard: 5-hour / weekly / estimated monthly progress bars, credit balances, plan and billing period, refreshed in the background every 5 minutes
 - Embedded single-file WebUI: usage dashboard, account/key management, model exposure editor, live settings, and log tail
@@ -130,7 +130,7 @@ The run prints the key as `COMMANDCODE_API_KEY=<the key>`; pass it to the gatewa
 
 ## Configuration
 
-The gateway is stateless: it reads no config file and writes none. The initial configuration is built in memory at startup, and everything else is added at runtime through the WebUI. Three optional environment variables seed the state so a redeploy keeps working without opening the WebUI first:
+The gateway is stateless: it reads no config file and writes none. The initial configuration is built in memory at startup, and everything else is added at runtime through the WebUI. Four optional environment variables seed the state so a redeploy keeps working without opening the WebUI first:
 
 | Variable | Meaning |
 | --- | --- |
@@ -138,6 +138,7 @@ The gateway is stateless: it reads no config file and writes none. The initial c
 | `ADMIN_PASSWORD` | WebUI admin password. When unset, a random password is generated on every start and printed to the logs. |
 | `COMMANDCODE_API_KEY` | Upstream Command Code key, seeding one account named `default` so the gateway works before you open the WebUI. |
 | `GOMEMLIMIT` | Go soft memory limit (the Compose file sets `512MiB`) to keep streaming buffers bounded under concurrent load. |
+| `ACCOUNT_STRATEGY` | Account selection strategy, e.g. `ACCOUNT_STRATEGY=priority`. Unset or unrecognized means `round_robin` (see [Multi-account rotation](#multi-account-rotation)). |
 
 Defaults that are always applied, whether or not any variable is set:
 
@@ -147,7 +148,7 @@ Defaults that are always applied, whether or not any variable is set:
 - `commandcode.base_url` — `https://api.commandcode.ai`.
 - `exclude_models` — `gpt-`, `claude-`, and `gemini-`, so these prefixes are hidden from `/v1/models` and rejected by `/v1/chat/completions`. These prefixes match both plain model IDs such as `gpt-4` and provider-qualified IDs such as `openai/gpt-4` by checking the part after the final `/`. To make all models available, remove the entries in the WebUI's Models tab.
 
-`host`, `port`, and `webui` come from the defaults or the `--host` / `--port` flags; they can also be changed in the WebUI's Settings tab, where the response reports which of them need a restart to take effect.
+`host`, `port`, and `webui` come from the defaults or the `--host` / `--port` flags; they can also be changed in the WebUI's Settings tab, where the response reports which of them need a restart to take effect. `account_strategy` is also editable there, and unlike the listener options it applies live with no restart, because the pool reads the strategy on every request.
 
 Accounts, client keys, and setting changes made in the WebUI apply in memory for the current process only — no restart is needed for them to take effect, but a process restart clears them.
 
@@ -176,6 +177,7 @@ exclude_models:
   - gpt-
   - claude-
   - gemini-
+account_strategy: round_robin
 ```
 
 Fields:
@@ -184,17 +186,39 @@ Fields:
 - `api_keys` — local bearer keys that clients use to call this gateway. Requests and token usage are tracked per key. Manage them in the WebUI, or seed the first one with `CLIENT_API_KEY`; entries exist in memory only and are lost on restart.
 - `admin_password` — password for the WebUI admin API. Taken from the `ADMIN_PASSWORD` environment variable, or generated at startup and printed once when that is unset.
 - `webui` — set to `false` to disable serving the embedded WebUI and admin API entirely.
-- `commandcode.accounts` — list of Command Code credentials. Requests rotate across enabled accounts (see below). Seed one with `COMMANDCODE_API_KEY`, or add them in the WebUI; the legacy single-key field `commandcode.api_key` is still accepted by the migration parser.
+- `commandcode.accounts` — list of Command Code credentials. Requests rotate across enabled accounts, and the ordering strategy is selectable (see [Multi-account rotation](#multi-account-rotation)). Seed one with `COMMANDCODE_API_KEY`, or add them in the WebUI; the legacy single-key field `commandcode.api_key` is still accepted by the migration parser.
 - `commandcode.base_url` — Command Code API base URL.
 - `host` — HTTP listen host. Defaults to `localhost`; use `0.0.0.0` to listen on all interfaces.
 - `port` — HTTP listen port. Defaults to `11434`.
 - `exclude_models` — model ID prefixes hidden from `/v1/models` and rejected by `/v1/chat/completions`. Maintained from the WebUI's Models tab, where the upstream catalog is shown with checkboxes; changes apply live.
+- `account_strategy` — account selection strategy, `round_robin` (default) or `priority`. Like the other keys it is only read by the migration parser; set `ACCOUNT_STRATEGY` or the WebUI setting to change the running server (see [Multi-account rotation](#multi-account-rotation)).
 
 ## Multi-account rotation
 
-Every chat request is sent with the next enabled account in round-robin order. When an account fails with `401`, `403`, `429`, or a 5xx, the request is retried with the next account automatically:
+Requests are spread across the enabled accounts using a selectable **selection strategy**. Two strategies exist:
 
-- A `429` puts the account into cooldown for the upstream `Retry-After` duration (60 seconds by default); cooldown accounts are skipped until they recover. If every enabled account is cooling down, the client receives `429 rate_limit_error` with the earliest recovery time.
+- **`round_robin`** (default, and the previous behavior) — an atomic cursor rotates evenly across the eligible accounts, so consecutive requests land on different accounts. Use it when every account draws on the same kind of quota and you want to spread load and rate limits.
+- **`priority`** — always uses the earliest account in the configured list and moves to the next one only when the earlier account becomes unusable. Use it for prepaid or limited plans where you want to drain one account's quota before touching the next; the order it follows is exactly the order of `commandcode.accounts` in the configuration, not any ranking by balance or remaining credits.
+
+An account is unusable and skipped by the pool when either of these holds:
+
+- **It is rate limited** — a `429` puts it into cooldown for the upstream `Retry-After` duration (60 seconds by default); cooldown accounts are skipped until they recover.
+- **Upstream quota reports it exhausted** — the gateway already polls Command Code's quota endpoints every 5 minutes and caches a snapshot per account, and that cached data is now also consulted during selection. An account counts as exhausted when the snapshot reports an exceeded 5-hour window, an exceeded weekly window, or a non-empty `Exceeded` field.
+
+Absence of quota data never benches an account: a missing snapshot, or one whose most recent query failed (an unknown state), keeps the account in rotation. Only an explicit upstream "exceeded" signal removes it.
+
+Configure the strategy in any of three equivalent ways:
+
+- **Environment variable** — `ACCOUNT_STRATEGY=priority`, which fits the stateless, environment-driven design.
+- **WebUI Settings tab** — the setting is `account_strategy` and applies live with no restart, because the pool reads the strategy on every request.
+- **Legacy YAML** — the `account_strategy` key, accepted by the migration parser only, exactly like the other YAML keys documented above.
+
+Accepted values are `priority` (which also accepts the aliases `sequential` and `failover`) and `round_robin`. Any unrecognized value falls back to `round_robin` rather than failing startup. The strategy in effect is reported in the startup log, which reads for example `accounts: N configured, M enabled (strategy: priority)`.
+
+Failover behavior is unchanged. When an account fails with `401`, `403`, `429`, or a 5xx, the request is retried with the next account automatically:
+
+- A `429` puts the account into cooldown for the upstream `Retry-After` duration (60 seconds by default); cooldown accounts are skipped until they recover. With `priority`, a `429` on the first account marks it cooling down and the retry immediately moves to the next account.
+- If every enabled account is unusable, the client receives `429 rate_limit_error`. The message distinguishes the two causes: all accounts rate limited (with the earliest recovery time in `Retry-After`) versus all accounts out of quota; when neither applies, it falls back to a generic "no Command Code account is currently available".
 - `400`/`422` (bad request) and client-canceled contexts are not retried.
 - Failover happens before any bytes are sent to the client; once a stream has started it is never replayed on another account.
 - Per-account request/token counters are kept in memory and reset on restart; error state, last error, and cooldown windows are runtime-only and visible in the WebUI.
@@ -224,7 +248,7 @@ Tabs:
 - **Accounts** — add (paste a key, or run OAuth and paste the redirect link when the browser cannot reach the server), edit name/key, enable/disable, connectivity test, quota refresh, delete; per-account requests, tokens, errors, cooldown state, last error, and quota. OAuth-added accounts are named after the Command Code user automatically
 - **Models** — checkbox list of upstream models; checked = exposed via `/v1/models` and callable, unchecked = hidden. This is the editor for `exclude_models` and applies live
 - **Keys** — create local client API keys, enable/disable, copy, delete; per-key usage (see [Client keys](#client-keys))
-- **Settings** — edit `base_url` (live), `host`/`port`/`webui` (in memory, applied on restart), and change the admin password (requires the current password; every existing admin session is kicked afterwards)
+- **Settings** — edit `base_url` (live), `account_strategy` (live: the account selection strategy, see [Multi-account rotation](#multi-account-rotation)), `host`/`port`/`webui` (in memory, applied on restart), and change the admin password (requires the current password; every existing admin session is kicked afterwards)
 - **Logs** — tail of the in-memory log ring (last 500 lines)
 
 Accounts and settings are added and changed only at runtime through the WebUI. Changes apply in memory for the current process only — no restart is needed for them to take effect, but they are gone when the process restarts.

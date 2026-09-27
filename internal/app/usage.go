@@ -206,6 +206,26 @@ func (u *UsageTracker) Quota(id string) *QuotaSnapshot {
 	return u.quotas[id]
 }
 
+// AccountBlocked reports whether quota data says an account is out of credits.
+//
+// It is consulted on every account selection, so it reuses the existing lock
+// and never treats absent data as blocked: a missing snapshot, or one whose
+// last query failed, reflects an unknown state rather than an exhausted
+// account, and must not remove it from rotation. Only an explicit upstream
+// signal (an exceeded window, or the Exceeded field) blocks it.
+func (u *UsageTracker) AccountBlocked(id string) bool {
+	if id == "" {
+		return false
+	}
+	u.accMu.Lock()
+	snap := u.quotas[id]
+	u.accMu.Unlock()
+	if snap == nil || snap.LastError != "" {
+		return false
+	}
+	return snap.Blocked()
+}
+
 // SetQuota stores an account's latest quota snapshot.
 func (u *UsageTracker) SetQuota(id string, snap *QuotaSnapshot) {
 	if id == "" || snap == nil {

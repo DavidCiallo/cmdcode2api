@@ -7,7 +7,7 @@
 ## 功能
 
 - OpenAI 兼容的 `POST /v1/chat/completions`（流式与非流式）与 `GET /v1/models`
-- 多 Command Code 账号轮询使用，`401`/`403`/`429`/5xx 自动故障转移，含账号级 429 冷却
+- 多 Command Code 账号，可选账号选择策略（轮询轮换或优先消耗），按额度跳过已耗尽账号，`401`/`403`/`429`/5xx 自动故障转移，含账号级 429 冷却
 - 多客户端密钥，每把密钥独立统计请求与 token 用量
 - Command Code 额度仪表盘：5 小时 / 本周 / 按月估算进度条、余额、套餐与账期，后台每 5 分钟刷新
 - 内嵌单文件 WebUI：用量总览、账号/密钥管理、模型开放编辑器、在线设置、日志查看
@@ -130,7 +130,7 @@ docker run --rm -it --network host \
 
 ## 配置
 
-网关是无状态的：既不读取也不写出任何配置文件。初始配置在启动时于内存中构建，其余内容都在运行时通过 WebUI 添加。以下环境变量均为可选，用于让重新部署后无需先打开 WebUI 即可工作：
+网关是无状态的：既不读取也不写出任何配置文件。初始配置在启动时于内存中构建，其余内容都在运行时通过 WebUI 添加。以下四个环境变量均为可选，用于让重新部署后无需先打开 WebUI 即可工作：
 
 | 变量 | 说明 |
 | --- | --- |
@@ -138,6 +138,7 @@ docker run --rm -it --network host \
 | `ADMIN_PASSWORD` | WebUI 管理密码；未设置时每次启动随机生成并打印到日志 |
 | `COMMANDCODE_API_KEY` | 上游 Command Code Key，预置一个名为 `default` 的账号，使网关在不打开 WebUI 时即可用 |
 | `GOMEMLIMIT` | Go 软内存上限（Compose 文件中设为 `512MiB`），避免高并发下流式缓冲无限增长 |
+| `ACCOUNT_STRATEGY` | 账号选择策略，例如 `ACCOUNT_STRATEGY=priority`；未设置或取值无法识别时为 `round_robin`（见[多账号轮换](#多账号轮换)） |
 
 无论是否设置任何变量，以下默认值都会生效：
 
@@ -147,7 +148,7 @@ docker run --rm -it --network host \
 - `commandcode.base_url`：`https://api.commandcode.ai`。
 - `exclude_models`：`gpt-`、`claude-`、`gemini-`，这些前缀会从 `/v1/models` 隐藏并在 `/v1/chat/completions` 中拒绝调用。匹配时同时支持普通模型 ID（例如 `gpt-4`）和带 provider 的 ID（例如 `openai/gpt-4`，会匹配最后一个 `/` 后面的 `gpt-4`）。需要开放所有模型时，在 WebUI「模型」页取消勾选。
 
-`host`、`port`、`webui` 取自默认值或 `--host` / `--port` 旗标，也可以在 WebUI「设置」页修改，接口会返回其中哪些需要重启才能生效。
+`host`、`port`、`webui` 取自默认值或 `--host` / `--port` 旗标，也可以在 WebUI「设置」页修改，接口会返回其中哪些需要重启才能生效。`account_strategy` 同样可在该页修改，但它与监听相关选项不同：由于连接池在每次请求时读取策略，改动**无需重启即时生效**。
 
 在 WebUI 中添加账号、密钥或修改设置只作用于当前进程的内存——改动无需重启即可生效，但进程重启后即被清除。
 
@@ -176,6 +177,7 @@ exclude_models:
   - gpt-
   - claude-
   - gemini-
+account_strategy: round_robin
 ```
 
 字段说明：
@@ -184,17 +186,39 @@ exclude_models:
 - `api_keys`：调用本网关的客户端密钥列表，每把密钥独立统计请求与 token 用量。可在 WebUI 中管理，或用 `CLIENT_API_KEY` 预置第一把；这些条目只存在于内存中，重启即丢失。
 - `admin_password`：WebUI 管理 API 的密码；取自 `ADMIN_PASSWORD` 环境变量，未设置时启动自动生成并打印一次。
 - `webui`：设为 `false` 可完全不托管内嵌 WebUI 与管理 API。
-- `commandcode.accounts`：Command Code 账号列表，请求在其间轮换（见下）。可用 `COMMANDCODE_API_KEY` 预置一个，或在 WebUI 中添加；旧的 `commandcode.api_key` 单 Key 写法仍可由迁移解析器识别。
+- `commandcode.accounts`：Command Code 账号列表，请求在其间轮换，轮换顺序的策略可选（见下）。可用 `COMMANDCODE_API_KEY` 预置一个，或在 WebUI 中添加；旧的 `commandcode.api_key` 单 Key 写法仍可由迁移解析器识别。
 - `commandcode.base_url`：Command Code API 地址。
 - `host`：HTTP 监听地址，默认 `localhost`；对外监听设置为 `0.0.0.0`。
 - `port`：HTTP 监听端口，默认 `11434`。
 - `exclude_models`：从 `/v1/models` 隐藏、并在 `/v1/chat/completions` 中拒绝调用的模型 ID 前缀。在 WebUI「模型」页以复选框方式维护，改动即时生效。
+- `account_strategy`：账号选择策略，`round_robin`（默认）或 `priority`。与其他键一样，它只由迁移解析器读取；要改变运行中的服务请设置 `ACCOUNT_STRATEGY` 环境变量或 WebUI 中的同名设置（见[多账号轮换](#多账号轮换)）。
 
 ## 多账号轮换
 
-每次 chat 请求按轮询方式使用下一个启用的账号。账号返回 `401`、`403`、`429` 或 5xx 时自动换下一个账号重试：
+请求按可选的**账号选择策略**分配到启用的账号上。共有两种策略：
 
-- `429`：按上游 `Retry-After` 冷却该账号（缺省 60 秒），冷却期内跳过；全部账号都在冷却时向客户端返回 `429 rate_limit_error` 和最早恢复时间。
+- **`round_robin`**（默认，也是此前的行为）：通过原子游标在可用账号间均匀轮换，相邻请求落在不同账号上。适合各账号额度性质相同、希望把负载与限流摊开的场景。
+- **`priority`**：始终使用配置列表中最靠前的账号，只有当前面的账号不可用时才顺延到下一个。适合预付费或额度有限的套餐——先把一个账号的额度用尽再动用下一个。它遵循的顺序就是配置中 `commandcode.accounts` 的排列顺序，而不是按余额或剩余额度排序。
+
+账号处于以下任一状态时即为不可用，会被连接池跳过：
+
+- **被限流**：返回 `429` 后按上游 `Retry-After` 时长冷却（缺省 60 秒），冷却期内跳过。
+- **上游额度报告为已耗尽**：网关本就每 5 分钟轮询一次 Command Code 的额度接口并按账号缓存快照，现在这份缓存数据也会在选择账号时被参考。当快照显示 5 小时窗口超限、本周窗口超限，或 `Exceeded` 字段非空时，该账号视为已耗尽。
+
+没有额度数据绝不会让账号被停用：缺少快照、或最近一次查询失败（状态未知）的账号会继续参与轮换，只有上游明确给出"超限"信号才会将其移出。
+
+配置该策略有三种等价方式：
+
+- **环境变量**：`ACCOUNT_STRATEGY=priority`，契合无状态、由环境变量驱动的设计。
+- **WebUI「设置」页**：对应设置项为 `account_strategy`，**无需重启即时生效**——连接池在每次请求时读取策略。
+- **旧版 YAML**：`account_strategy` 键，仅由迁移解析器识别，与上文其他 YAML 键的说明一致。
+
+可接受的取值为 `priority`（同时接受别名 `sequential` 与 `failover`）和 `round_robin`。任何无法识别的取值都会回退为 `round_robin`，而不是让启动失败。当前生效的策略会出现在启动日志中，形如 `accounts: N configured, M enabled (strategy: priority)`。
+
+故障转移行为没有变化：账号返回 `401`、`403`、`429` 或 5xx 时自动换下一个账号重试：
+
+- `429`：按上游 `Retry-After` 冷却该账号（缺省 60 秒），冷却期内跳过。使用 `priority` 时，首个账号被 `429` 标记冷却后，重试会立即顺延到下一个账号。
+- 启用的账号全部不可用时，向客户端返回 `429 rate_limit_error`；错误信息会区分两种原因：全部账号被限流（并在 `Retry-After` 中给出最早恢复时间），或全部账号额度耗尽；两者都不适用时使用通用的"no Command Code account is currently available"。
 - `400` / `422`（请求本身有问题）与客户端主动取消不重试。
 - 故障转移只发生在向客户端写出任何字节之前；流式响应一旦开始不会在另一个账号上重放。
 - 每个账号的请求 / token 计数保存在内存中，重启即归零；错误信息、冷却窗口等运行时状态可在 WebUI 中查看。
@@ -224,7 +248,7 @@ http://localhost:11434/webui
 - **账号**：添加（粘贴 Key；或走 OAuth，浏览器访问不到服务器时粘贴跳转链接）、编辑名称/Key、启用/禁用、连通性测试、刷新额度、删除；展示每账号请求数、tokens、错误、冷却状态、最近错误与额度。OAuth 添加的账号按登录账号名自动命名
 - **模型**：上游模型复选框列表，勾选 = 对外提供（`/v1/models` 可见、可调用），取消勾选 = 隐藏并拒绝调用；本页即 exclude_models 的可视化编辑器，改动即时生效
 - **密钥**：新建客户端 API Key、启用/禁用、复制、删除；每把密钥独立用量统计（见[客户端密钥](#客户端密钥)）
-- **设置**：`base_url`（即时生效）、`host`/`port`/`webui`（存于内存，重启后生效）、修改管理密码（需提供原密码，成功后踢出所有已登录管理会话）
+- **设置**：`base_url`（即时生效）、`account_strategy`（即时生效：账号选择策略，见[多账号轮换](#多账号轮换)）、`host`/`port`/`webui`（存于内存，重启后生效）、修改管理密码（需提供原密码，成功后踢出所有已登录管理会话）
 - **日志**：内存日志环形缓冲（最近 500 行）实时查看
 
 账号与设置只在运行时通过 WebUI 增删改。改动只对当前进程的内存生效——无需重启即可生效，但进程重启后即被清除。

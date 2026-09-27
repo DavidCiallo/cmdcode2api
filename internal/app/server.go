@@ -169,7 +169,10 @@ func runServer(cc *CCClient, cfg *Config, usage *UsageTracker, ring *logRing) er
 
 	pool := cc.Pool
 	if pool == nil {
-		pool = NewAccountPool(nil)
+		pool = NewAccountPool(nil,
+			WithStrategy(cfg.SelectionStrategy()),
+			WithQuotaSource(usage),
+		)
 	}
 	keys := NewClientKeyPool(cfg.APIKeys)
 	quotas := NewQuotaService(cc, pool, usage)

@@ -600,6 +600,7 @@ func adminSettingsFrom(cfg *Config) adminSettings {
 		Port:             cfg.Port,
 		WebUI:            cfg.WebUIEnabled(),
 		AdminPasswordSet: cfg.adminPassword() != "",
+		AccountStrategy:  cfg.SelectionStrategy().String(),
 	}
 }
 
@@ -610,16 +611,18 @@ type adminSettings struct {
 	Port             int      `json:"port"`
 	WebUI            bool     `json:"webui"`
 	AdminPasswordSet bool     `json:"admin_password_set"`
+	AccountStrategy  string   `json:"account_strategy"`
 }
 
 type adminSettingsUpdate struct {
-	BaseURL       *string   `json:"base_url"`
-	ExcludeModels *[]string `json:"exclude_models"`
-	Host          *string   `json:"host"`
-	Port          *int      `json:"port"`
-	WebUI         *bool     `json:"webui"`
-	AdminPassword *string   `json:"admin_password"`
-	OldPassword   *string   `json:"old_password"`
+	BaseURL         *string   `json:"base_url"`
+	ExcludeModels   *[]string `json:"exclude_models"`
+	Host            *string   `json:"host"`
+	Port            *int      `json:"port"`
+	AccountStrategy *string   `json:"account_strategy"`
+	WebUI           *bool     `json:"webui"`
+	AdminPassword   *string   `json:"admin_password"`
+	OldPassword     *string   `json:"old_password"`
 }
 
 // handleAdminSettingsPut applies settings. exclude_models, base_url, and the
@@ -648,6 +651,11 @@ func handleAdminSettingsPut(cfg *Config, cc *CCClient, pool *AccountPool) http.H
 
 		if body.ExcludeModels != nil {
 			cfg.SetExcludes(normalizeExcludeModels(*body.ExcludeModels))
+		}
+		if body.AccountStrategy != nil {
+			// Applied live: the pool reads the strategy on every Acquire.
+			cfg.SetAccountStrategy(*body.AccountStrategy)
+			pool.SetStrategy(cfg.SelectionStrategy())
 		}
 		if body.BaseURL != nil {
 			url := strings.TrimSpace(*body.BaseURL)
